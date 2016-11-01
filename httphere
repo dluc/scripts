@@ -12,8 +12,8 @@ fi
 PWD=$(pwd)/.
 HERE=$(dirname $PWD)/
 
-docker rm -f "apache$PORT" 2&> /dev/null
-docker run --name "apache$PORT" -p $PORT:80 -v $HERE:/var/www/html/ -d eboraas/apache
+docker rm -f "httpd$PORT" 2&> /dev/null
+docker run --name "httpd$PORT" -p $PORT:80 -v $HERE:/var/www/html/ -d eboraas/apache
 
 IP=$(ifconfig|grep inet|grep netmask|grep -v 127.0.0|tr -d '\t'|cut -d ' ' -f 2)
 echo "=> http://$IP:$PORT"
