@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# Utility to store secrets in Azure Key Vault.
+
+# Configuration, set the Azure subscription name and the name of the vault
+AZSUB=$ENV_KEYVAULT_AZURE_SUB_NAME
+VAULTNAME=$ENV_KEYVAULT_VAULT_NAME
+
+function usage(){
+  NAME=$(basename $0)
+  echo "Usage: $NAME list"
+  echo "       $NAME listkeys"
+  echo "       $NAME get <keyname>"
+  echo "       $NAME set <keyname> <value>"
+  echo "       $NAME download <keyname> <output filename>"
+  echo "       $NAME upload <keyname> <input filename>"
+  echo "       $NAME export <output filename>"
+  echo "       $NAME delete <keyname>"
+}
+
+# Dependencies
+function checkjq(){
+  TEST=$(which jq)
+  if [[ -z "$TEST" ]]; then
+    echo "ERROR: 'jq' command not found. Install 'jq' first, e.g. 'brew install jq'."
+    exit -1
+  fi  
+}
+
+function slack(){
+  echo $* > /dev/null
+}
+
+TEST=$(which azure)
+if [[ -z "$TEST" ]]; then
+  echo "ERROR: 'azure' command not found. Install Azure xplat CLI first (https://azure.microsoft.com/en-us/documentation/articles/xplat-cli-install)."
+  exit -1
+fi
+
+# Read input
+CMD=$1
+if [[ -z $CMD ]]; then
+  usage && exit -1
+fi
+
+# Auth
+OK="Y" && azure account set "$AZSUB" &> /dev/null && azure keyvault secret list -u "$VAULTNAME" &> /dev/null || OK="N"
+if [[ "$OK" = "N" ]]; then
+  azure login
+fi
+
+# Execute command
+KEYNAME=$2
+DATA=$3
+case $CMD in
+
+  "list" )
+    azure keyvault secret list -u "$VAULTNAME"
+  ;;
+
+  "listkeys" )
+    checkjq
+    azure keyvault secret list -u "$VAULTNAME" --json|jq .[].id|sed 's/https.*\///g'|sed s/\"//g
+  ;;
+
+  "get" )
+    checkjq
+    azure keyvault secret show -u "$VAULTNAME" -s "$KEYNAME" --json|jq .value 
+  ;;
+
+  "set" )
+    OK="N" && azure keyvault secret show -u "$VAULTNAME" -s "$KEYNAME" &> /dev/null || OK="Y"
+    if [[ "$OK" = "N" ]]; then
+      echo "ERROR: Key already exists."
+      exit -1
+    fi
+    azure keyvault secret set -u "$VAULTNAME" -s "$KEYNAME" -w "$DATA" -t Text && slack "Key Vault" "key '$KEYNAME' stored"
+  ;;
+
+  "download" )
+    if [[ -z "$DATA" ]]; then echo "ERROR: Filename not specified" && exit -1; fi
+    if [[ -f "$DATA" ]]; then echo "ERROR: Output file already exists." && exit -1; fi
+    TYPE="txt" && azure keyvault secret show -u "$VAULTNAME" -s "$KEYNAME" | grep "tags BinaryFile" > /dev/null && TYPE="bin"
+    if [[ $TYPE = "txt" ]]; then
+      azure keyvault secret get -u "$VAULTNAME" -s "$KEYNAME" --file "$DATA"
+    else
+      azure keyvault secret get -u "$VAULTNAME" -s "$KEYNAME" --file "$DATA" --decode-binary base64
+    fi
+  ;;
+
+  "upload" )
+    if [[ -z "$DATA" ]]; then echo "ERROR: Filename not specified" && exit -1; fi
+    if [[ ! -f "$DATA" ]]; then echo "ERROR: Input file '$DATA' doesn't exist." && exit -1; fi
+    OK="N" && azure keyvault secret show -u "$VAULTNAME" -s "$KEYNAME" &> /dev/null || OK="Y"
+    if [[ "$OK" = "N" ]]; then
+      echo "ERROR: Key already exists."
+      exit -1
+    fi
+    TAG="TextFile" && file "$DATA" | grep -vq "text" && TAG="BinaryFile"
+    if [[ $TAG = "TextFile" ]]; then
+      azure keyvault secret set -u "$VAULTNAME" -s "$KEYNAME" --file "$DATA" -t $TAG && slack "Key Vault" "file '$KEYNAME' uploaded"
+    else
+      azure keyvault secret set -u "$VAULTNAME" -s "$KEYNAME" --file "$DATA" -t $TAG --encode-binary base64 && slack "Key Vault" "file '$KEYNAME' uploaded"
+    fi
+  ;;
+
+  "delete" )
+    azure keyvault secret delete -u "$VAULTNAME" -s "$KEYNAME" && slack "Key Vault" "key '$KEYNAME' deleted"
+  ;;
+
+  "export" )
+    checkjq
+    DATA="$KEYNAME"
+    if [[ -z "$DATA" ]]; then echo "ERROR: Filename not specified" && exit -1; fi
+    if [[ -f "$DATA" ]]; then echo "ERROR: Output file already exists." && exit -1; fi
+    LIST=$(azure keyvault secret list -u "$VAULTNAME" --json|jq .[].id|sed 's/https.*\///g'|sed s/\"//g || exit -1)
+    touch "$DATA" && chmod 600 "$DATA"
+    for KEY in $LIST; do
+      VALUE=$(azure keyvault secret show -u "$VAULTNAME" -s "$KEY" --json|jq .value)
+      echo \"$KEY\",$VALUE >> "$DATA"
+    done
+  ;;
+
+  * )
+    usage && exit -1
+  ;;
+esac
